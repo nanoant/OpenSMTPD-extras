@@ -84,7 +84,7 @@ dkim_signer_add_hdr_line(struct dkim_signer *s, const char *line)
 }
 
 static void
-dkim_signer_clear(struct dkim_signer *s)
+dkim_signer_destructor(struct dkim_signer *s)
 {
 	struct entry *n;
 
@@ -99,8 +99,8 @@ dkim_signer_clear(struct dkim_signer *s)
 	free(s);
 }
 
-static int
-dkim_signer_on_data(uint64_t id)
+static struct dkim_signer *
+dkim_signer_allocator(uint64_t id)
 {
 	struct dkim_signer *s = xmalloc(sizeof *s, "dkim_signer: on_data");
 
@@ -112,17 +112,27 @@ dkim_signer_on_data(uint64_t id)
 	s->emptylines = 0;
 	s->hdrs_list[0] = '\0';
 
-	filter_api_set_udata(id, s);
+	return s;
+}
+
+static int
+dkim_signer_on_data(uint64_t id)
+{
 	return filter_api_accept(id);
 }
 
 static void
-dkim_signer_on_dataline(uint64_t id, const char *line)
+dkim_signer_on_msg_start(uint64_t id)
+{
+}
+
+static void
+dkim_signer_on_msg_line(uint64_t id, const char *line)
 {
 	struct dkim_signer *s;
 	struct entry *n;
 
-	if ((s = filter_api_get_udata(id)) == NULL)
+	if ((s = filter_api_transaction(id)) == NULL)
 		return;
 	n = xmalloc(sizeof *n, "dkim_signer: on_dataline");
 	n->line = xstrdup(line, "dkim_signer: on_dataline");
@@ -160,15 +170,15 @@ dkim_signer_on_dataline(uint64_t id, const char *line)
 }
 
 static int
-dkim_signer_on_eom(uint64_t id, size_t size)
+dkim_signer_on_msg_end(uint64_t id, size_t size)
 {
 	struct dkim_signer *s;
 	struct entry *n;
 	char *dkim_header = NULL, *dkim_sig = NULL, *rsa_sig = NULL;
 	int dkim_sig_len, rsa_sig_len, r = 0;
 
-	if ((s = filter_api_get_udata(id)) == NULL) {
-		log_warnx("warn: on_eom: get_udata failed");
+	if ((s = filter_api_transaction(id)) == NULL) {
+		log_warnx("warn: on_eom: get transaction failed");
 		goto done;
 	}
 	/* empty body should be treated as a single CRLF */
@@ -223,20 +233,6 @@ done:
 	free(dkim_sig);
 	free(rsa_sig);
 	return r ? filter_api_accept(id) : filter_api_reject(id, FILTER_FAIL);
-}
-
-static void
-dkim_signer_on_tx_commit(uint64_t id)
-{
-	dkim_signer_clear(filter_api_get_udata(id));
-	filter_api_set_udata(id, NULL);
-}
-
-static void
-dkim_signer_on_tx_rollback(uint64_t id)
-{
-	dkim_signer_clear(filter_api_get_udata(id));
-	filter_api_set_udata(id, NULL);
 }
 
 int
@@ -307,10 +303,11 @@ main(int argc, char **argv)
 		fatalx("PEM_read_RSAPrivateKey");
 
 	filter_api_on_data(dkim_signer_on_data);
-	filter_api_on_dataline(dkim_signer_on_dataline);
-	filter_api_on_eom(dkim_signer_on_eom);
-	filter_api_on_tx_commit(dkim_signer_on_tx_commit);
-	filter_api_on_tx_rollback(dkim_signer_on_tx_rollback);
+	filter_api_on_msg_start(dkim_signer_on_msg_start);
+	filter_api_on_msg_line(dkim_signer_on_msg_line);
+	filter_api_on_msg_end(dkim_signer_on_msg_end);
+	filter_api_transaction_allocator(dkim_signer_allocator);
+	filter_api_transaction_destructor(dkim_signer_destructor);
 	if (c)
 		filter_api_set_chroot(c);
 	if (C)
